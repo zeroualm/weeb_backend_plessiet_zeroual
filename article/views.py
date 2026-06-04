@@ -1,6 +1,7 @@
 from rest_framework import generics
 
 from .models import Article
+from .permissions import IsActiveUserOrReadOnly
 from .serializers import ArticleSerializer
 
 class ArticleListCreateAPIView(generics.ListCreateAPIView):
@@ -10,6 +11,7 @@ class ArticleListCreateAPIView(generics.ListCreateAPIView):
 
     queryset = Article.objects.all()
     serializer_class = ArticleSerializer
+    permission_classes = [IsActiveUserOrReadOnly]
 
 class ArticleDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     """
@@ -19,3 +21,4 @@ class ArticleDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
     queryset = Article.objects.all()
     serializer_class = ArticleSerializer
+    permission_classes = [IsActiveUserOrReadOnly]
