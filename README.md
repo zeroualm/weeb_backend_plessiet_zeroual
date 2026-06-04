@@ -49,4 +49,10 @@ Serveur disponible sur : http://127.0.0.1:8000/
 
 ---
 
-## Endpoints principaux (en cours)
+## Endpoints principaux 
+
+* POST /api/users/signup/ --> Création de compte
+* POST /api/users/token/ --> Connexion (retourne access et refresh JWT)
+* POST /api/users/token/refresh/ --> Rafraîchir l’access token
+* POST /api/users/password-reset/request/ --> Demande la réinitialisation du mot de passe
+* POST /api/users/password-reset/confirm/ --> Confirme la réinitialisation du mot de passe
