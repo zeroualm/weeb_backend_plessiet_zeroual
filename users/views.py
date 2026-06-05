@@ -1,7 +1,8 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -13,6 +14,42 @@ from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from .serializers import SignUpSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 
 User = get_user_model() 
+
+# -----------------------------
+# Logout view
+# -----------------------------
+
+class LogoutView(APIView):
+    """
+    Vue permettant à un utilisateur de se déconnecter.
+
+    Cette vue est protégée par une authentification (IsAuthenticated). 
+    Lorsqu'un utilisateur authentifié accède à cet endpoint, sa session ou 
+    son token d'authentification est invalidé, ce qui le déconnecte de l'application.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Gère la requête POST pour la déconnexion.
+
+        Args:
+            request: L'objet requête DRF contenant les informations d'authentification de l'utilisateur.
+
+        Returns:
+            Response: Un objet HTTP Response indiquant que la déconnexion a réussi.
+        """
+        # Ici, vous pouvez implémenter la logique pour invalider le token JWT ou la session de l'utilisateur.
+        # Par exemple, si vous utilisez des tokens JWT, vous pourriez ajouter le token à une blacklist.
+
+        try :
+            refresh_token = request.data.get("refresh_token")
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except Exception as e:
+            return Response({"error": "Token invalide ou déjà blacklisté."}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"message": "Déconnexion réussie"}, status=status.HTTP_205_RESET_CONTENT)
 
 # -----------------------------
 # SignUp view
@@ -151,6 +188,10 @@ class PasswordResetConfirmView(generics.GenericAPIView):
                 validate_password(password, user)
             except ValidationError as e:
                 return Response({'error': e.messages}, status=status.HTTP_400_BAD_REQUEST)
+            
+            user.set_password(password)
+            user.save()
+
             return Response({'message': 'Le mot de passe a été réinitialisé avec succès.'}, status=status.HTTP_200_OK)
 
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
