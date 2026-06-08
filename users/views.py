@@ -1,9 +1,11 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.contrib.auth.password_validation import validate_password
@@ -16,6 +18,94 @@ from .serializers import SignUpSerializer, PasswordResetRequestSerializer, Passw
 User = get_user_model() 
 
 # -----------------------------
+# Login view
+# -----------------------------
+
+class CustomTokenView(TokenObtainPairView):
+    """
+    Vue gérant la connexion d'un utilisateur.
+
+    Elle surcharge le comportement par défaut de SimpleJWT pour placer 
+    le jeton de rafraîchissement (refresh token) dans un cookie HttpOnly sécurisé,
+    afin de le protéger contre les failles XSS côté client.
+    """
+
+    def post(self, request, *args, **kwargs):
+        """
+        Gère la requête POST pour authentifier un utilisateur.
+
+        Args:
+            request: L'objet requête DRF contenant les identifiants (email/mot de passe).
+            *args, **kwargs: Arguments supplémentaires passés à la vue parent.
+
+        Returns:
+            Response: Un objet HTTP Response.
+                - 200 OK: Contient uniquement l'access token (le refresh est placé en cookie).
+                - 401 UNAUTHORIZED: Si les identifiants sont invalides.
+        """
+        # On laisse SimpleJWT valider les identifiants et générer les tokens
+        response = super().post(request, *args, **kwargs)
+        refresh_token = response.data.get('refresh')
+        
+        if refresh_token:
+            # Refresh token dans un cookie sécurisé
+            response.set_cookie(
+                key='refresh',
+                value=refresh_token,
+                httponly=True,
+                secure=not settings.DEBUG, # True en production (HTTPS)
+                samesite='Lax',
+                max_age=3 * 60 # 3mins comme dans settings.py (SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'])
+            )
+            # On retire le refresh token du JSON renvoyé au front
+            del response.data['refresh'] 
+            
+        return response
+
+class CookieRefreshView(TokenRefreshView):
+    """
+    Vue permettant le rafraîchissement de l'access token.
+
+    Elle intercepte la requête pour lire le refresh token depuis le cookie
+    HttpOnly du navigateur, le valide via SimpleJWT, et renvoie un nouvel
+    access token ainsi qu'un nouveau cookie pour la rotation.
+    """
+    def post(self, request, *args, **kwargs):
+        """
+        Gère la requête POST pour rafraîchir la session.
+
+        Args:
+            request: L'objet requête DRF contenant les cookies du navigateur.
+            *args, **kwargs: Arguments supplémentaires passés à la vue parent.
+
+        Returns:
+            Response: Un objet HTTP Response.
+                - 200 OK: Contient le nouvel access token (et remplace le cookie refresh).
+                - 401 UNAUTHORIZED: Si le token est invalide ou expiré.
+        """
+        # On récupère le token depuis le cookie
+        refresh_token = request.COOKIES.get('refresh')
+        
+        if refresh_token:
+            request.data['refresh'] = refresh_token
+
+        response = super().post(request, *args, **kwargs)
+
+        new_refresh = response.data.get('refresh')
+        if new_refresh:
+            response.set_cookie(
+                key='refresh',
+                value=new_refresh,
+                httponly=True,
+                secure=not settings.DEBUG,
+                samesite='Lax',
+                max_age=3 * 60
+            )
+            del response.data['refresh']
+
+        return response
+
+# -----------------------------
 # Logout view
 # -----------------------------
 
@@ -24,8 +114,8 @@ class LogoutView(APIView):
     Vue permettant à un utilisateur de se déconnecter.
 
     Cette vue est protégée par une authentification (IsAuthenticated). 
-    Lorsqu'un utilisateur authentifié accède à cet endpoint, sa session ou 
-    son token d'authentification est invalidé, ce qui le déconnecte de l'application.
+    Elle lit le refresh token dans le cookie, l'ajoute à la liste noire 
+    pour l'invalider, puis supprime le cookie du navigateur.
     """
     permission_classes = [IsAuthenticated]
 
@@ -34,22 +124,26 @@ class LogoutView(APIView):
         Gère la requête POST pour la déconnexion.
 
         Args:
-            request: L'objet requête DRF contenant les informations d'authentification de l'utilisateur.
+            request: L'objet requête DRF contenant le header d'authentification et les cookies.
 
         Returns:
             Response: Un objet HTTP Response indiquant que la déconnexion a réussi.
+                - 205 RESET CONTENT: Déconnexion réussie.
         """
-        # Ici, vous pouvez implémenter la logique pour invalider le token JWT ou la session de l'utilisateur.
-        # Par exemple, si vous utilisez des tokens JWT, vous pourriez ajouter le token à une blacklist.
+        refresh_token = request.COOKIES.get('refresh')
+        
+        if refresh_token:
+            try:        
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except Exception:
+                # Si le token est déjà expiré, on l'ignore
+                pass 
 
-        try :
-            refresh_token = request.data.get("refresh_token")
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-        except Exception as e:
-            return Response({"error": "Token invalide ou déjà blacklisté."}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response({"message": "Déconnexion réussie"}, status=status.HTTP_205_RESET_CONTENT)
+        response = Response({"message": "Déconnexion réussie"}, status=status.HTTP_205_RESET_CONTENT)
+        # On supprime le cookie du navigateur
+        response.delete_cookie('refresh')
+        return response
 
 # -----------------------------
 # SignUp view
