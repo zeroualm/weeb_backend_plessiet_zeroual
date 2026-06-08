@@ -224,7 +224,7 @@ class RequestPasswordResetEmailView(generics.GenericAPIView):
 
             # Affichage terminal pour tests
             print(f"\n--- EMAIL DE REINITIALISATION ENVOYE A {user.email} ---")
-            print(f"URL: {reset_url}")
+            print(f"Token: {reset_url}")
             print(f"Token: {token}")
             print(f"UID (base64): {uidb64}")
             print("-------------------------------------------------------\n")
