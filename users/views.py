@@ -1,18 +1,231 @@
 from rest_framework import generics, status
-from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework.views import APIView
 
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from .serializers import SignUpSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 
 User = get_user_model() 
+
+# =========================
+# UTILITAIRES
+# =========================
+
+def set_refresh_token_cookie(response, refresh_token):
+    """
+    Stocke le refresh token dans un cookie HttpOnly.
+    Ce cookie sera automatiquement envoyé au backend par le navigateur
+    si le frontend appelle l'API avec credentials: "include".
+    """
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=False,   # True en production avec HTTPS
+        samesite="Lax",
+        path="/api/users/",
+        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+    )
+
+
+def delete_refresh_token_cookie(response):
+    """
+    Supprime le cookie côté navigateur.
+    Important : Le path DOIT être le même que celui utilisé lors du set_cookie
+    """
+    response.delete_cookie(
+        key="refresh_token",
+        path="/api/users/",
+    )
+
+# -----------------------------
+# Login view
+# -----------------------------
+
+class CustomTokenView(TokenObtainPairView):
+    """
+    Vue gérant la connexion d'un utilisateur.
+
+    Elle surcharge le comportement par défaut de SimpleJWT pour placer 
+    le jeton de rafraîchissement (refresh token) dans un cookie HttpOnly sécurisé,
+    afin de le protéger contre les failles XSS côté client.
+    """
+
+    def post(self, request, *args, **kwargs):
+        """
+        Gère la requête POST pour authentifier un utilisateur.
+
+        Args:
+            request: L'objet requête DRF contenant les identifiants (email/mot de passe).
+            *args, **kwargs: Arguments supplémentaires passés à la vue parent.
+
+        Returns:
+            Response: Un objet HTTP Response.
+                - 200 OK: Contient uniquement l'access token (le refresh est placé en cookie).
+                - 401 UNAUTHORIZED: Si les identifiants sont invalides.
+        """
+        # On laisse SimpleJWT valider les identifiants et générer les tokens
+        response = super().post(request, *args, **kwargs)
+        refresh_token = response.data.get('refresh')
+        
+        if refresh_token:
+            # CORRECTION : On utilise ENFIN ta fonction utilitaire !
+            set_refresh_token_cookie(response, refresh_token)
+            
+            # On retire le refresh token du JSON renvoyé au front
+            del response.data['refresh'] 
+            
+        return response
+
+class CookieRefreshView(TokenRefreshView):
+    """
+    Vue permettant le rafraîchissement de l'access token.
+
+    Elle intercepte la requête pour lire le refresh token depuis le cookie
+    HttpOnly du navigateur, le valide via SimpleJWT, et renvoie un nouvel
+    access token ainsi qu'un nouveau cookie pour la rotation.
+    """
+    def post(self, request, *args, **kwargs):
+        """
+        Gère la requête POST pour rafraîchir la session.
+
+        Args:
+            request: L'objet requête DRF contenant les cookies du navigateur.
+            *args, **kwargs: Arguments supplémentaires passés à la vue parent.
+
+        Returns:
+            Response: Un objet HTTP Response.
+                - 200 OK: Contient le nouvel access token (et remplace le cookie refresh).
+                - 401 UNAUTHORIZED: Si le token est invalide ou expiré.
+        """
+        permission_classes = [AllowAny]  
+        authentication_classes = []   
+        # 1. On récupère le refresh token depuis le cookie
+        refresh_token = request.COOKIES.get("refresh_token")
+
+        if not refresh_token:
+            return Response(
+                {"detail": "No refresh token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        
+        try:
+            token = RefreshToken(refresh_token)
+            
+            session_exp = token.get("exp") 
+
+            if session_exp is None:
+                response = Response(
+                    {"detail": "Session expirée, veuillez vous reconnecter"},
+                    status = status.HTTP_401_UNAUTHORIZED,
+                )
+                delete_refresh_token_cookie(response)
+                return response
+            
+            now_timestamp = int(timezone.now().timestamp())
+
+            if now_timestamp >= int(session_exp):
+                try:
+                    token.blacklist()
+                except TokenError:
+                    pass 
+
+                response = Response(
+                    {"detail": "Session expirée, veuillez vous reconnecter"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+                delete_refresh_token_cookie(response)
+                return response
+        
+        except TokenError:
+            response = Response(
+                {"detail": "Refresh token invalide ou expiré"},
+                status = status.HTTP_401_UNAUTHORIZED,
+            )
+            delete_refresh_token_cookie(response)
+            return response
+
+
+        # 4. On donne l’ancien refresh token à SimpleJWT
+        serializer = TokenRefreshSerializer(data={"refresh": refresh_token})
+
+        try:
+            serializer.is_valid(raise_exception=True)
+        except (TokenError, ValidationError):
+            response = Response(
+                {"detail": "Refresh token invalide ou expiré"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            delete_refresh_token_cookie(response)
+            return response
+
+        data = serializer.validated_data
+ 
+        response = Response(
+            {"access": data["access"]},
+            status=status.HTTP_200_OK,
+        )
+
+        new_refresh_token = data.get("refresh")
+        if new_refresh_token:
+            set_refresh_token_cookie(response, new_refresh_token)
+
+        return response
+
+# -----------------------------
+# Logout view
+# -----------------------------
+
+class LogoutView(APIView):
+    """
+    Vue permettant à un utilisateur de se déconnecter.
+
+    Cette vue est protégée par une authentification (IsAuthenticated). 
+    Elle lit le refresh token dans le cookie, l'ajoute à la liste noire 
+    pour l'invalider, puis supprime le cookie du navigateur.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Gère la requête POST pour la déconnexion.
+
+        Args:
+            request: L'objet requête DRF contenant le header d'authentification et les cookies.
+
+        Returns:
+            Response: Un objet HTTP Response indiquant que la déconnexion a réussi.
+                - 205 RESET CONTENT: Déconnexion réussie.
+        """
+        refresh_token = request.COOKIES.get('refresh')
+        
+        if refresh_token:
+            try:        
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except Exception:
+                # Si le token est déjà expiré, on l'ignore
+                pass 
+
+        response = Response({"message": "Déconnexion réussie"}, status=status.HTTP_205_RESET_CONTENT)
+        # On supprime le cookie du navigateur
+        response.delete_cookie('refresh')
+        return response
 
 # -----------------------------
 # SignUp view
@@ -89,10 +302,11 @@ class RequestPasswordResetEmailView(generics.GenericAPIView):
             token = PasswordResetTokenGenerator().make_token(user)
 
             # URL à faire dans le .env en prod
-            #reset_url = f"http://localhost:3000/reset-password?uidb64={uidb64}&token={token}"
+            reset_url = f"http://localhost:5173/reset-password?uidb64={uidb64}&token={token}"
 
             # Affichage terminal pour tests
             print(f"\n--- EMAIL DE REINITIALISATION ENVOYE A {user.email} ---")
+            print(f"Token: {reset_url}")
             print(f"Token: {token}")
             print(f"UID (base64): {uidb64}")
             print("-------------------------------------------------------\n")
@@ -151,6 +365,10 @@ class PasswordResetConfirmView(generics.GenericAPIView):
                 validate_password(password, user)
             except ValidationError as e:
                 return Response({'error': e.messages}, status=status.HTTP_400_BAD_REQUEST)
+            
+            user.set_password(password)
+            user.save()
+
             return Response({'message': 'Le mot de passe a été réinitialisé avec succès.'}, status=status.HTTP_200_OK)
 
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
