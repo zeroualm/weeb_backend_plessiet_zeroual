@@ -1,21 +1,57 @@
 from rest_framework import generics, status
-from rest_framework.views import APIView
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework.views import APIView
+
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from .serializers import SignUpSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 
 User = get_user_model() 
+
+# =========================
+# UTILITAIRES
+# =========================
+
+def set_refresh_token_cookie(response, refresh_token):
+    """
+    Stocke le refresh token dans un cookie HttpOnly.
+    Ce cookie sera automatiquement envoyé au backend par le navigateur
+    si le frontend appelle l'API avec credentials: "include".
+    """
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=False,   # True en production avec HTTPS
+        samesite="Lax",
+        path="/api/users/",
+        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+    )
+
+
+def delete_refresh_token_cookie(response):
+    """
+    Supprime le cookie côté navigateur.
+    Important : Le path DOIT être le même que celui utilisé lors du set_cookie
+    """
+    response.delete_cookie(
+        key="refresh_token",
+        path="/api/users/",
+    )
 
 # -----------------------------
 # Login view
@@ -48,15 +84,9 @@ class CustomTokenView(TokenObtainPairView):
         refresh_token = response.data.get('refresh')
         
         if refresh_token:
-            # Refresh token dans un cookie sécurisé
-            response.set_cookie(
-                key='refresh',
-                value=refresh_token,
-                httponly=True,
-                secure=not settings.DEBUG, # True en production (HTTPS)
-                samesite='Lax',
-                max_age=3 * 60 # 3mins comme dans settings.py (SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'])
-            )
+            # CORRECTION : On utilise ENFIN ta fonction utilitaire !
+            set_refresh_token_cookie(response, refresh_token)
+            
             # On retire le refresh token du JSON renvoyé au front
             del response.data['refresh'] 
             
@@ -83,25 +113,77 @@ class CookieRefreshView(TokenRefreshView):
                 - 200 OK: Contient le nouvel access token (et remplace le cookie refresh).
                 - 401 UNAUTHORIZED: Si le token est invalide ou expiré.
         """
-        # On récupère le token depuis le cookie
-        refresh_token = request.COOKIES.get('refresh')
-        
-        if refresh_token:
-            request.data['refresh'] = refresh_token
+        permission_classes = [AllowAny]  
+        authentication_classes = []   
+        # 1. On récupère le refresh token depuis le cookie
+        refresh_token = request.COOKIES.get("refresh_token")
 
-        response = super().post(request, *args, **kwargs)
-
-        new_refresh = response.data.get('refresh')
-        if new_refresh:
-            response.set_cookie(
-                key='refresh',
-                value=new_refresh,
-                httponly=True,
-                secure=not settings.DEBUG,
-                samesite='Lax',
-                max_age=3 * 60
+        if not refresh_token:
+            return Response(
+                {"detail": "No refresh token"},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
-            del response.data['refresh']
+        
+        try:
+            token = RefreshToken(refresh_token)
+            
+            session_exp = token.get("exp") 
+
+            if session_exp is None:
+                response = Response(
+                    {"detail": "Session expirée, veuillez vous reconnecter"},
+                    status = status.HTTP_401_UNAUTHORIZED,
+                )
+                delete_refresh_token_cookie(response)
+                return response
+            
+            now_timestamp = int(timezone.now().timestamp())
+
+            if now_timestamp >= int(session_exp):
+                try:
+                    token.blacklist()
+                except TokenError:
+                    pass 
+
+                response = Response(
+                    {"detail": "Session expirée, veuillez vous reconnecter"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+                delete_refresh_token_cookie(response)
+                return response
+        
+        except TokenError:
+            response = Response(
+                {"detail": "Refresh token invalide ou expiré"},
+                status = status.HTTP_401_UNAUTHORIZED,
+            )
+            delete_refresh_token_cookie(response)
+            return response
+
+
+        # 4. On donne l’ancien refresh token à SimpleJWT
+        serializer = TokenRefreshSerializer(data={"refresh": refresh_token})
+
+        try:
+            serializer.is_valid(raise_exception=True)
+        except (TokenError, ValidationError):
+            response = Response(
+                {"detail": "Refresh token invalide ou expiré"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            delete_refresh_token_cookie(response)
+            return response
+
+        data = serializer.validated_data
+ 
+        response = Response(
+            {"access": data["access"]},
+            status=status.HTTP_200_OK,
+        )
+
+        new_refresh_token = data.get("refresh")
+        if new_refresh_token:
+            set_refresh_token_cookie(response, new_refresh_token)
 
         return response
 
