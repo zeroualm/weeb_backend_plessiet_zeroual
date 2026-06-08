@@ -220,10 +220,11 @@ class RequestPasswordResetEmailView(generics.GenericAPIView):
             token = PasswordResetTokenGenerator().make_token(user)
 
             # URL à faire dans le .env en prod
-            #reset_url = f"http://localhost:3000/reset-password?uidb64={uidb64}&token={token}"
+            reset_url = f"http://localhost:5173/reset-password?uidb64={uidb64}&token={token}"
 
             # Affichage terminal pour tests
             print(f"\n--- EMAIL DE REINITIALISATION ENVOYE A {user.email} ---")
+            print(f"URL: {reset_url}")
             print(f"Token: {token}")
             print(f"UID (base64): {uidb64}")
             print("-------------------------------------------------------\n")
