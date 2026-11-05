@@ -3,6 +3,16 @@ from rest_framework import generics
 from .models import Article
 from .permissions import IsActiveUserOrReadOnly
 from .serializers import ArticleSerializer
+from django.http import JsonResponse
+
+# =========================
+# Healthcheck
+# =========================
+
+def health_check(request):
+    """Une vue simple qui renvoie un statut de succès."""
+    return JsonResponse({"status": "ok", "message": "API is healthy"})
+    
 
 class ArticleListCreateAPIView(generics.ListCreateAPIView):
     """
