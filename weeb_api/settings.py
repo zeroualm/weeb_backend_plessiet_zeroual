@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'users',
     'contact',
     'article',
+    'monitoring',
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
@@ -162,7 +163,9 @@ STATIC_URL = 'static/'
 # production) pour activer Sentry. Si le DSN est vide, le SDK n'est pas
 # initialisé : le projet fonctionne normalement (dev local, CI, tests).
 
-SENTRY_DSN = config('SENTRY_DSN', default='')
+# Nettoyage : certaines plateformes (Render, Heroku...) renvoient parfois la
+# valeur entourée de guillemets ou avec des espaces / retours à la ligne.
+SENTRY_DSN = config('SENTRY_DSN', default='').strip().strip('"\'')
 SENTRY_ENVIRONMENT = config(
     'SENTRY_ENVIRONMENT',
     default='development' if DEBUG else 'production',
@@ -176,22 +179,49 @@ SENTRY_PROFILES_SAMPLE_RATE = config('SENTRY_PROFILES_SAMPLE_RATE', default=0.0,
 # On n'envoie pas les données personnelles (emails, corps de requêtes, cookies).
 SENTRY_SEND_DEFAULT_PII = config('SENTRY_SEND_DEFAULT_PII', default=False, cast=bool)
 
-if SENTRY_DSN:
-    import sentry_sdk
-    from sentry_sdk.integrations.django import DjangoIntegration
-    from sentry_sdk.integrations.logging import LoggingIntegration
+# Route de test /monitoring/sentry-error/ : génère volontairement une erreur 500.
+# La passer à False en production une fois le test Sentry effectué.
+SENTRY_TEST_ENABLED = config('SENTRY_TEST_ENABLED', default=True, cast=bool)
 
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        integrations=[
-            # Capture les exceptions non gérées des vues Django / DRF.
-            DjangoIntegration(),
-            # ERROR et au-dessus => événement Sentry, INFO+ => breadcrumb.
-            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
-        ],
-        environment=SENTRY_ENVIRONMENT,
-        release=SENTRY_RELEASE or None,
-        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
-        profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
-        send_default_pii=SENTRY_SEND_DEFAULT_PII,
-    )
+# Sentry ne doit jamais empêcher l'application de démarrer (build Render,
+# collectstatic, migrate...) : un DSN malformé ou une dépendance manquante est
+# signalé par un warning et Sentry est simplement désactivé.
+if SENTRY_DSN:
+    sentry_logger = logging.getLogger(__name__)
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+        from sentry_sdk.utils import Dsn
+
+        # Valide le format du DSN avant l'initialisation (lève BadDsn sinon).
+        Dsn(SENTRY_DSN)
+
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            integrations=[
+                # Capture les exceptions non gérées des vues Django / DRF.
+                DjangoIntegration(),
+                # ERROR et au-dessus => événement Sentry, INFO+ => breadcrumb.
+                LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            ],
+            environment=SENTRY_ENVIRONMENT,
+            release=SENTRY_RELEASE or None,
+            traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+            profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+            send_default_pii=SENTRY_SEND_DEFAULT_PII,
+        )
+    except ImportError as exc:
+        sentry_logger.warning(
+            "Sentry désactivé : le package sentry-sdk est introuvable (%s). Lancez "
+            "« pip install -r requirements.txt ».",
+            exc,
+        )
+    except Exception as exc:
+        sentry_logger.warning(
+            "Sentry désactivé : SENTRY_DSN invalide ou initialisation impossible "
+            "(%s: %s). Format attendu : "
+            "https://<cle_publique>@o<org>.ingest.sentry.io/<projet>",
+            type(exc).__name__,
+            exc,
+        )
