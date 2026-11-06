@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import logging
 from pathlib import Path
 from decouple import config
 from datetime import timedelta
@@ -152,3 +153,45 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+
+# =============================================================================
+# SENTRY — Monitoring des erreurs (https://docs.sentry.io/platforms/python/)
+# =============================================================================
+# Renseigner SENTRY_DSN dans le .env (ou dans les variables d'environnement en
+# production) pour activer Sentry. Si le DSN est vide, le SDK n'est pas
+# initialisé : le projet fonctionne normalement (dev local, CI, tests).
+
+SENTRY_DSN = config('SENTRY_DSN', default='')
+SENTRY_ENVIRONMENT = config(
+    'SENTRY_ENVIRONMENT',
+    default='development' if DEBUG else 'production',
+)
+SENTRY_RELEASE = config('SENTRY_RELEASE', default=None)
+
+# Performance monitoring : 0.0 = désactivé, 0.1 = 10 % des requêtes tracées.
+SENTRY_TRACES_SAMPLE_RATE = config('SENTRY_TRACES_SAMPLE_RATE', default=0.0, cast=float)
+SENTRY_PROFILES_SAMPLE_RATE = config('SENTRY_PROFILES_SAMPLE_RATE', default=0.0, cast=float)
+
+# On n'envoie pas les données personnelles (emails, corps de requêtes, cookies).
+SENTRY_SEND_DEFAULT_PII = config('SENTRY_SEND_DEFAULT_PII', default=False, cast=bool)
+
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+    from sentry_sdk.integrations.logging import LoggingIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[
+            # Capture les exceptions non gérées des vues Django / DRF.
+            DjangoIntegration(),
+            # ERROR et au-dessus => événement Sentry, INFO+ => breadcrumb.
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+        ],
+        environment=SENTRY_ENVIRONMENT,
+        release=SENTRY_RELEASE or None,
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+        send_default_pii=SENTRY_SEND_DEFAULT_PII,
+    )
